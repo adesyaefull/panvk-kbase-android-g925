@@ -1,0 +1,223 @@
+From: PanVK Build Environment
+Subject: [PATCH csf-v13 105] panvk: report CSF device faults
+
+Preserve the first queue fault reported by CSF status checks and expose it
+through VK_EXT_device_fault as vendor data. Do not label the raw CS_FAULT_INFO
+register as a decoded GPU address or advertise vendor binary support.
+
+diff --git a/src/panfrost/vulkan/panvk_device.h b/src/panfrost/vulkan/panvk_device.h
+--- a/src/panfrost/vulkan/panvk_device.h
++++ b/src/panfrost/vulkan/panvk_device.h
+@@ -47,6 +47,15 @@
+ struct panvk_precomp_cache;
+ struct panvk_device_draw_context;
+ 
++struct panvk_device_fault {
++   bool recorded;
++   uint32_t status;
++   uint32_t error;
++   uint32_t queue_family_index;
++   uint32_t subqueue;
++   uint64_t info;
++};
++
+ enum panvk_queue_family {
+    PANVK_QUEUE_FAMILY_GPU,
+    PANVK_QUEUE_FAMILY_BIND,
+@@ -56,6 +65,11 @@ enum panvk_queue_family {
+ struct panvk_device {
+    struct vk_device vk;
+ 
++   struct {
++      simple_mtx_t lock;
++      struct panvk_device_fault report;
++   } fault;
++
+    struct {
+       simple_mtx_t lock;
+       struct util_vma_heap heap;
+@@ -154,6 +168,28 @@ struct panvk_device {
+ 
+ VK_DEFINE_HANDLE_CASTS(panvk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
+ 
++static inline void
++panvk_device_record_fault(struct panvk_device *dev, uint32_t status,
++                          uint64_t info, uint32_t error,
++                          uint32_t queue_family_index, uint32_t subqueue)
++{
++   simple_mtx_lock(&dev->fault.lock);
++   if (!dev->fault.report.recorded ||
++       ((!dev->fault.report.status && !dev->fault.report.error &&
++         !dev->fault.report.info) &&
++        (status || error || info))) {
++      dev->fault.report = (struct panvk_device_fault) {
++         .recorded = true,
++         .status = status,
++         .error = error,
++         .queue_family_index = queue_family_index,
++         .subqueue = subqueue,
++         .info = info,
++      };
++   }
++   simple_mtx_unlock(&dev->fault.lock);
++}
++
+ static inline struct panvk_device *
+ to_panvk_device(struct vk_device *dev)
+ {
+diff --git a/src/panfrost/vulkan/panvk_vX_device.c b/src/panfrost/vulkan/panvk_vX_device.c
+--- a/src/panfrost/vulkan/panvk_vX_device.c
++++ b/src/panfrost/vulkan/panvk_vX_device.c
+@@ -486,6 +486,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
+    if (result != VK_SUCCESS)
+       goto err_free_dev;
+ 
++   simple_mtx_init(&device->fault.lock, mtx_plain);
++
+    /* Must be done after vk_device_init() because this function memset(0) the
+     * whole struct.
+     */
+@@ -829,6 +831,7 @@ err_destroy_kdev:
+    pan_kmod_dev_destroy(device->kmod.dev);
+ 
+ err_finish_dev:
++   simple_mtx_destroy(&device->fault.lock);
+    vk_device_finish(&device->vk);
+ 
+ err_free_dev:
+@@ -836,6 +839,48 @@ err_free_dev:
+    return result;
+ }
+ 
++VKAPI_ATTR VkResult VKAPI_CALL
++panvk_per_arch(GetDeviceFaultInfoEXT)(VkDevice _device,
++                                      VkDeviceFaultCountsEXT *pFaultCounts,
++                                      VkDeviceFaultInfoEXT *pFaultInfo)
++{
++   VK_FROM_HANDLE(panvk_device, dev, _device);
++   struct panvk_device_fault report;
++   simple_mtx_lock(&dev->fault.lock);
++   report = dev->fault.report;
++   simple_mtx_unlock(&dev->fault.lock);
++
++   pFaultCounts->addressInfoCount = 0;
++   pFaultCounts->vendorBinarySize = 0;
++
++   if (pFaultInfo) {
++      pFaultInfo->description[0] = '\0';
++      if (report.recorded) {
++         snprintf(pFaultInfo->description, sizeof(pFaultInfo->description),
++                  "PanVK CSF device fault captured; raw fault registers are "
++                  "reported as vendor data, not decoded as an address.");
++      }
++   }
++
++   VK_OUTARRAY_MAKE_TYPED(VkDeviceFaultVendorInfoEXT, out,
++                          pFaultInfo ? pFaultInfo->pVendorInfos : NULL,
++                          &pFaultCounts->vendorInfoCount);
++   if (report.recorded) {
++      vk_outarray_append_typed(VkDeviceFaultVendorInfoEXT, &out, elem) {
++         elem->vendorFaultCode =
++            ((uint64_t)dev->vk.physical->properties.vendorID << 32) |
++            report.status;
++         elem->vendorFaultData = report.info;
++         snprintf(elem->description, sizeof(elem->description),
++                  "CSF status=0x%08x error=0x%08x queueFamily=%u subqueue=%u",
++                  report.status, report.error, report.queue_family_index,
++                  report.subqueue);
++      }
++   }
++
++   return vk_outarray_status(&out);
++}
++
+ void
+ panvk_per_arch(destroy_device)(struct panvk_device *device,
+                                const VkAllocationCallbacks *pAllocator)
+@@ -879,6 +918,7 @@ panvk_per_arch(destroy_device)(struct panvk_device *device,
+    if (device->as.split_heap)
+       util_vma_heap_finish(&device->as.fixed_heap);
+    simple_mtx_destroy(&device->as.lock);
++   simple_mtx_destroy(&device->fault.lock);
+ 
+    if (device->debug.decode_ctx)
+       pandecode_destroy_context(device->debug.decode_ctx);
+diff --git a/src/panfrost/vulkan/panvk_vX_physical_device.c b/src/panfrost/vulkan/panvk_vX_physical_device.c
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -164,6 +164,7 @@ panvk_per_arch(get_physical_device_extensions)(
+       .EXT_depth_clip_control = true,
+       .EXT_device_address_binding_report = true,
+       .EXT_device_memory_report = true,
++      .EXT_device_fault = PAN_ARCH >= 10,
+ #ifdef VK_USE_PLATFORM_DISPLAY_KHR
+       .EXT_display_control = true,
+ #endif
+@@ -784,5 +785,9 @@ panvk_per_arch(get_physical_device_features)(
+       /* VK_EXT_device_memory_report */
+       .deviceMemoryReport = true,
+ 
++      /* VK_EXT_device_fault */
++      .deviceFaultEXT = PAN_ARCH >= 10,
++      .deviceFaultVendorBinaryEXT = false,
++
+       /* VK_ARM_shader_core_builtins */
+       .shaderCoreBuiltins = true,
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+@@ -815,6 +815,10 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
+          uint32_t exc = cs_fault & 0xffu;
+          if (exc == 0 && cs_fault_lo == 0 && cs_fault_hi == 0)
+             goto kbase_wait_continue;
++         panvk_device_record_fault(dev, cs_fault,
++                                   ((uint64_t)cs_fault_hi << 32) | cs_fault_lo,
++                                   cell->error, queue->vk.queue_family_index,
++                                   subqueue);
+          mesa_loge("kbase: CS error 0x%x on subqueue %u"
+                    " fault 0x%x info 0x%08x%08x",
+                    cell->error, subqueue, cs_fault, cs_fault_hi, cs_fault_lo);
+@@ -3270,6 +3274,34 @@ panvk_per_arch(gpu_queue_check_status)(struct vk_queue *vk_queue)
+     * every Vulkan status query. */
+    if (gpu_queue_uses_kbase(dev)) {
+       if (kbase_kmod_csf_has_error(dev->kmod.dev)) {
++         bool recorded = false;
++         for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
++            struct panvk_subqueue *subq = &queue->subqueues[i];
++            if (!subq->kbase.user_io)
++               continue;
++
++            const uint8_t *output_page =
++               (const uint8_t *)subq->kbase.user_io + 8192;
++            const uint32_t cs_fault =
++               *(const volatile uint32_t *)(output_page + 0x80);
++            const uint32_t cs_fault_lo =
++               *(const volatile uint32_t *)(output_page + 0x88);
++            const uint32_t cs_fault_hi =
++               *(const volatile uint32_t *)(output_page + 0x8c);
++            const volatile struct panvk_cs_sync64 *cell =
++               kbase_subqueue_seqno_cell(queue, i);
++            if (cs_fault || cs_fault_lo || cs_fault_hi || cell->error) {
++               panvk_device_record_fault(
++                  dev, cs_fault, ((uint64_t)cs_fault_hi << 32) | cs_fault_lo,
++                  cell->error, queue->vk.queue_family_index, i);
++               recorded = true;
++               break;
++            }
++         }
++         if (!recorded)
++            panvk_device_record_fault(dev, 0, 0, 0,
++                                      queue->vk.queue_family_index,
++                                      UINT32_MAX);
+          u_printf_with_ctx(stdout, &dev->printf.ctx);
+          return vk_queue_set_lost(&queue->vk,
+                                   "kbase: CSF queue-group error");
+@@ -3284,5 +3316,8 @@ panvk_per_arch(gpu_queue_check_status)(struct vk_queue *vk_queue)
+       panvk_priv_mem_readback(queue->subqueues[i].context, 0,
+                               struct panvk_cs_subqueue_context, subq_ctx) {
+          if (subq_ctx->last_error != 0) {
++            panvk_device_record_fault(dev, subq_ctx->last_error, 0,
++                                      subq_ctx->last_error,
++                                      queue->vk.queue_family_index, i);
+             /* Check printf buffer one more time before exiting */
+             u_printf_with_ctx(stdout, &dev->printf.ctx);

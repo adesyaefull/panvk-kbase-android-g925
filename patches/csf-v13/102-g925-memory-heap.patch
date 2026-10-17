@@ -1,0 +1,11 @@
+diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/panvk_physical_device.c
+--- a/src/panfrost/vulkan/panvk_physical_device.c
++++ b/src/panfrost/vulkan/panvk_physical_device.c
+@@ -240 +240 @@
+-   const uint64_t heap_size =
++   const uint64_t detected_heap_size =
+@@ -242,0 +243,4 @@
++   const uint32_t gpu_id = device->kmod.dev->props.gpu_id;
++   const bool is_g925 = gpu_id == 0xd8300015 || gpu_id == 0xd8300010;
++   const uint64_t heap_size =
++      is_g925 ? 11759542272ull : detected_heap_size;

@@ -1,0 +1,19 @@
+From: PanVK Build Environment
+Subject: [PATCH csf-v13 102] panvk: expose KHR robustness2 alias on v11+
+
+The KHR spelling aliases VK_EXT_robustness2. Expose it only where PanVK
+implements robustBufferAccess2, while reporting robustImageAccess2 accurately.
+
+diff --git a/src/panfrost/vulkan/panvk_vX_physical_device.c b/src/panfrost/vulkan/panvk_vX_physical_device.c
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -98,7 +98,8 @@ panvk_per_arch(get_physical_device_extensions)(
+       .KHR_pipeline_library = true,
+       .KHR_push_descriptor = true,
+       .KHR_relaxed_block_layout = true,
+-      .KHR_robustness2 = false,
++      /* The KHR spelling is an alias of EXT_robustness2 in Vulkan 1.4. */
++      .KHR_robustness2 = PAN_ARCH >= 11,
+       .KHR_sampler_mirror_clamp_to_edge = true,
+       .KHR_sampler_ycbcr_conversion = true,
+       .KHR_separate_depth_stencil_layouts = true,

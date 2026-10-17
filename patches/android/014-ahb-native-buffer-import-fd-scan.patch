@@ -1,0 +1,151 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH android 014] scan native-buffer fds when importing DMA-BUF memory
+
+Purpose: Do not assume native_handle_t::data[0] is the DMA-BUF when importing
+VkNativeBufferANDROID memory. Probe every seekable handle fd with
+vkGetMemoryFdPropertiesKHR, matching the robust AHB allocation-size query.
+The G925 PanVK log records repeated GetMemoryFdPropertiesKHR failures during
+the Android renderer startup.
+Source/Reference: Local PanVK G925 log panvk23.log (2026-10-16); Mesa
+vk_android.c AHB allocation-size query.
+Tested GPU: Mali G925 (failure observed; fix requires device validation).
+Tested Kbase UAPI: CSF (failure observed; fix requires device validation).
+Mesa base range: 26.3.0-devel (pinned 5a07217f).
+Dependencies: 008-ahb-dma-buf-finder.patch.
+Validation test: test_android_native_buffer_import_fd.py; Android AHB Gate G
+must be rerun on device.
+
+diff --git a/src/vulkan/runtime/vk_android.c b/src/vulkan/runtime/vk_android.c
+--- a/src/vulkan/runtime/vk_android.c
++++ b/src/vulkan/runtime/vk_android.c
+@@ -208,6 +208,52 @@
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++vk_android_find_dma_buf_fd(struct vk_device *device,
++                           const native_handle_t *handle,
++                           int *out_fd,
++                           off_t *out_size,
++                           VkMemoryFdPropertiesKHR *out_fd_props)
++{
++   if (!handle || handle->numFds <= 0)
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++
++   *out_fd = -1;
++   for (int i = 0; i < handle->numFds; i++) {
++      int fd = handle->data[i];
++      if (fd < 0)
++         continue;
++
++      struct stat st;
++      if (fstat(fd, &st) < 0)
++         continue;
++
++      off_t size = lseek(fd, 0, SEEK_END);
++      if (size <= 0)
++         continue;
++
++      VkMemoryFdPropertiesKHR fd_props = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
++      };
++      VkResult result = device->dispatch_table.GetMemoryFdPropertiesKHR(
++         (VkDevice)device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
++         fd, &fd_props);
++      if (result == VK_SUCCESS) {
++         *out_fd = fd;
++         if (out_size)
++            *out_size = size;
++         if (out_fd_props)
++            *out_fd_props = fd_props;
++         return VK_SUCCESS;
++      }
++
++      if (result != VK_ERROR_INVALID_EXTERNAL_HANDLE)
++         return result;
++   }
++
++   return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++}
++
+ VkResult
+ vk_android_import_anb_memory(struct vk_device *device,
+                              struct vk_image *image,
+@@ -216,22 +262,21 @@
+ {
+    assert(anb && anb->handle && anb->handle->numFds > 0);
+ 
+-   int dma_buf_fd = anb->handle->data[0];
++   int dma_buf_fd;
++   VkMemoryFdPropertiesKHR fd_props = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
++   };
++   VkResult result = vk_android_find_dma_buf_fd(
++      device, anb->handle, &dma_buf_fd, NULL, &fd_props);
++   if (result != VK_SUCCESS) {
++      mesa_loge("No importable DMA-BUF fd in native buffer handle (%d fds)",
++                anb->handle->numFds);
++      return result;
++   }
+ 
+    /* Query image memory requirements for size and supported memory types */
+    VkMemoryRequirements mem_reqs;
+    device->dispatch_table.GetImageMemoryRequirements(
+       (VkDevice)device, (VkImage)image, &mem_reqs);
+ 
+-   VkMemoryFdPropertiesKHR fd_props = {
+-      .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
+-   };
+-   VkResult result = device->dispatch_table.GetMemoryFdPropertiesKHR(
+-      (VkDevice)device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+-      dma_buf_fd, &fd_props);
+-   if (result != VK_SUCCESS) {
+-      mesa_loge("GetMemoryFdPropertiesKHR failed");
+-      return result;
+-   }
+-
+    uint32_t compatible_types = mem_reqs.memoryTypeBits & fd_props.memoryTypeBits;
+@@ -1227,37 +1272,16 @@
+    const native_handle_t *handle = AHardwareBuffer_getNativeHandle(buffer);
+    if (!handle || handle->numFds <= 0)
+       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+ 
+-   int dma_buf = -1;
+-   off_t dma_buf_size = -1;
++   int dma_buf;
++   off_t dma_buf_size;
+    VkMemoryFdPropertiesKHR fd_props = {
+       .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
+    };
+-
+-   for (int i = 0; i < handle->numFds; i++) {
+-      int fd = handle->data[i];
+-      if (fd < 0)
+-         continue;
+-
+-      struct stat st;
+-      if (fstat(fd, &st) < 0)
+-         continue;
+-
+-      off_t size = lseek(fd, 0, SEEK_END);
+-      if (size <= 0)
+-         continue;
+-
+-      if (device->dispatch_table.GetMemoryFdPropertiesKHR(
+-             device_h, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd,
+-             &fd_props) == VK_SUCCESS) {
+-         dma_buf = fd;
+-         dma_buf_size = size;
+-         break;
+-      }
+-   }
+-
+-   if (dma_buf < 0 || dma_buf_size <= 0)
+-      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   result = vk_android_find_dma_buf_fd(device, handle, &dma_buf,
++                                       &dma_buf_size, &fd_props);
++   if (result != VK_SUCCESS)
++      return result;
+ 
+    pProperties->allocationSize = (VkDeviceSize)dma_buf_size;
+    pProperties->memoryTypeBits = fd_props.memoryTypeBits;

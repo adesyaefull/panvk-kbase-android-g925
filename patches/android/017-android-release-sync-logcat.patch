@@ -1,0 +1,45 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH android 017] log release-image sync failures to logcat
+
+Purpose: Write the failing vkQueueSignalReleaseImageANDROID stage directly
+to Mesa logcat. The prior vk_errorf diagnostics were not visible in the
+G925 renderer's captured log.
+Dependencies: 016-android-release-image-sync-diagnostics.patch.
+Validation: Android arm64/API 35 source compile; runtime retest required.
+
+diff --git a/src/vulkan/runtime/vk_android.c b/src/vulkan/runtime/vk_android.c
+--- a/src/vulkan/runtime/vk_android.c
++++ b/src/vulkan/runtime/vk_android.c
+@@ -628,5 +628,8 @@
+    result = vk_anb_semaphore_init_once(queue, device);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      mesa_loge("vkQueueSignalReleaseImageANDROID: semaphore initialization "
++                "failed (%d)", result);
+       return vk_errorf(
+          device, result,
+          "vkQueueSignalReleaseImageANDROID: semaphore initialization failed");
++   }
+@@ -661,4 +664,7 @@
+    STACK_ARRAY_FINISH(wait_infos);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      mesa_loge("vkQueueSignalReleaseImageANDROID: QueueSubmit2 "
++                "failed (%d)", result);
+       return vk_errorf(device, result,
+                        "vkQueueSignalReleaseImageANDROID: QueueSubmit2 failed");
++   }
+@@ -673,9 +679,12 @@
+    result = device->dispatch_table.GetSemaphoreFdKHR(vk_device_to_handle(device),
+                                                      &get_fd, pNativeFenceFd);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      mesa_loge("vkQueueSignalReleaseImageANDROID: GetSemaphoreFdKHR failed "
++                "(%d)", result);
+       return vk_errorf(
+          device, result,
+          "vkQueueSignalReleaseImageANDROID: GetSemaphoreFdKHR failed");
++   }
+ 
+    return VK_SUCCESS;
+ }

@@ -1,0 +1,233 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH android 018] trace Android release sync payload copy failures
+
+Purpose: Distinguish the semaphore payload-copy path from QueueSubmit2 and
+log the exact vk_device and DRM syncobj operation that fails, including errno.
+Dependencies: 017-android-release-sync-logcat.patch.
+Validation: Android arm64/API 35 ICD compile/link; device runtime retest required.
+
+diff --git a/src/vulkan/runtime/vk_android.c b/src/vulkan/runtime/vk_android.c
+--- a/src/vulkan/runtime/vk_android.c
++++ b/src/vulkan/runtime/vk_android.c
+@@ -665,10 +665,10 @@
+    }
+    STACK_ARRAY_FINISH(wait_infos);
+    if (result != VK_SUCCESS) {
+-      mesa_loge("vkQueueSignalReleaseImageANDROID: QueueSubmit2 "
++      mesa_loge("vkQueueSignalReleaseImageANDROID: semaphore payload copy "
+                 "failed (%d)", result);
+       return vk_errorf(device, result,
+-                       "vkQueueSignalReleaseImageANDROID: QueueSubmit2 failed");
++                       "vkQueueSignalReleaseImageANDROID: semaphore payload copy failed");
+    }
+ 
+    const VkSemaphoreGetFdInfoKHR get_fd = {
+diff --git a/src/vulkan/runtime/vk_device.c b/src/vulkan/runtime/vk_device.c
+--- a/src/vulkan/runtime/vk_device.c
++++ b/src/vulkan/runtime/vk_device.c
+@@ -723,6 +723,8 @@
+       struct vk_sync_timeline_point *wait_point = NULL;
+       VkResult result = vk_sync_wait_unwrap(device, &wait, &wait_point);
+       if (unlikely(result != VK_SUCCESS)) {
++         mesa_loge("vk_device_copy_semaphore_payloads: wait unwrap %u/%u "
++                   "failed (%d)", i, wait_semaphore_count, result);
+          goto fail;
+       }
+ 
+@@ -753,6 +755,8 @@
+       struct vk_sync_timeline_point *signal_point = NULL;
+       VkResult result = vk_sync_signal_unwrap(device, &signal, &signal_point);
+       if (unlikely(result != VK_SUCCESS)) {
++         mesa_loge("vk_device_copy_semaphore_payloads: signal unwrap %u/%u "
++                   "failed (%d)", i, signal_semaphore_count, result);
+          goto fail;
+       }
+ 
+@@ -771,6 +775,8 @@
+       struct vk_sync_timeline_point *signal_point = NULL;
+       VkResult result = vk_sync_signal_unwrap(device, &signal, &signal_point);
+       if (unlikely(result != VK_SUCCESS)) {
++         mesa_loge("vk_device_copy_semaphore_payloads: fence signal unwrap "
++                   "%u/%u failed (%d)", i, fence_count, result);
+          goto fail;
+       }
+ 
+@@ -786,6 +792,8 @@
+       /* Nothing to wait on.  Just signal everything */
+       result = vk_sync_signal_many(device, signal_count, signals);
+       if (result != VK_SUCCESS) {
++         mesa_loge("vk_device_copy_semaphore_payloads: signal_many "
++                   "(signals=%u) failed (%d)", signal_count, result);
+          goto fail;
+       }
+    } else if (signal_count > 0) {
+@@ -793,6 +801,8 @@
+       result = vk_sync_wait_many(device, wait_count, waits,
+                                  VK_SYNC_WAIT_PENDING, UINT64_MAX);
+       if (result != VK_SUCCESS) {
++         mesa_loge("vk_device_copy_semaphore_payloads: wait_many "
++                   "(waits=%u) failed (%d)", wait_count, result);
+          goto fail;
+       }
+ 
+@@ -800,6 +810,9 @@
+       result = device->copy_sync_payloads(device, wait_count, waits,
+                                           signal_count, signals);
+       if (result != VK_SUCCESS) {
++         mesa_loge("vk_device_copy_semaphore_payloads: copy_sync_payloads "
++                   "(waits=%u signals=%u) failed (%d)",
++                   wait_count, signal_count, result);
+          goto fail;
+       }
+    }
+@@ -821,6 +834,8 @@
+    if (reset_count > 0) {
+       result = vk_sync_reset_many(device, reset_count, resets);
+       if (result != VK_SUCCESS) {
++         mesa_loge("vk_device_copy_semaphore_payloads: reset_many "
++                   "(resets=%u) failed (%d)", reset_count, result);
+          goto fail;
+       }
+    }
+diff --git a/src/vulkan/runtime/vk_drm_syncobj.c b/src/vulkan/runtime/vk_drm_syncobj.c
+--- a/src/vulkan/runtime/vk_drm_syncobj.c
++++ b/src/vulkan/runtime/vk_drm_syncobj.c
+@@ -29,6 +29,7 @@
+ #include "drm-uapi/drm.h"
+ 
+ #include "util/libsync.h"
++#include "util/log.h"
+ #include "util/os_time.h"
+ #include "util/u_sync_provider.h"
+ 
+@@ -37,6 +38,7 @@
+ #include "vk_physical_device.h"
+ #include "vk_util.h"
+ 
++#include <errno.h>
+ 
+ static struct vk_drm_syncobj *
+ to_drm_syncobj(struct vk_sync *sync)
+@@ -98,6 +100,9 @@
+    else
+       err = device->sync->signal(device->sync, &sobj->syncobj, 1);
+    if (err) {
++      int saved_errno = errno;
++      mesa_loge("vk_drm_syncobj_signal: syncobj signal failed "
++                "(err=%d errno=%d)", err, saved_errno);
+       return vk_errorf(device, VK_ERROR_UNKNOWN,
+                     "DRM_IOCTL_SYNCOBJ_SIGNAL failed: %m");
+    }
+@@ -139,6 +144,13 @@
+    if (binary_count > 0) {
+       err |= device->sync->signal(device->sync, binary_handles,
+                                   binary_count);
++   }
++
++   if (err) {
++      int saved_errno = errno;
++      mesa_loge("vk_drm_syncobj_signal_many: timeline=%u binary=%u "
++                "failed (err=%d errno=%d)",
++                timeline_count, binary_count, err, saved_errno);
+    }
+ 
+    STACK_ARRAY_FINISH(timeline_handles);
+@@ -357,6 +369,9 @@
+    if (err && errno == ETIME) {
+       return VK_TIMEOUT;
+    } else if (err) {
++      int saved_errno = errno;
++      mesa_loge("vk_drm_syncobj_wait_many: syncobj wait failed "
++                "(err=%d errno=%d)", err, saved_errno);
+       return vk_errorf(device, VK_ERROR_UNKNOWN,
+                        "DRM_IOCTL_SYNCOBJ_WAIT failed: %m");
+    }
+@@ -411,6 +426,9 @@
+ 
+    int err = device->sync->import_sync_file(device->sync, sobj->syncobj, sync_file);
+    if (err) {
++      int saved_errno = errno;
++      mesa_loge("vk_drm_syncobj_import_sync_file: import failed "
++                "(err=%d errno=%d)", err, saved_errno);
+       return vk_errorf(device, VK_ERROR_UNKNOWN,
+                        "DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE failed: %m");
+    }
+@@ -427,6 +445,9 @@
+ 
+    int err = device->sync->export_sync_file(device->sync, sobj->syncobj, sync_file);
+    if (err) {
++      int saved_errno = errno;
++      mesa_loge("vk_drm_syncobj_export_sync_file: export failed "
++                "(err=%d errno=%d)", err, saved_errno);
+       return vk_errorf(device, VK_ERROR_UNKNOWN,
+                        "DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD failed: %m");
+    }
+@@ -497,6 +518,10 @@
+          int ret = sync_merge("vk_drm_syncobj", merged, wait_fd);
+          close(wait_fd);
+          if (ret < 0) {
++            int saved_errno = errno;
++            mesa_loge("vk_drm_copy_sync_file_payloads: SYNC_IOC_MERGE "
++                      "wait=%u failed (ret=%d errno=%d)",
++                      i, ret, saved_errno);
+             result = vk_errorf(device, VK_ERROR_UNKNOWN,
+                                "SYNC_IOC_MERGE failed: %m");
+             goto fail;
+@@ -562,6 +587,10 @@
+                                           signal_sobj->syncobj, signal_value,
+                                           wait_sobj->syncobj, wait_value, 0);
+          if (err) {
++            int saved_errno = errno;
++            mesa_loge("vk_drm_syncobj_transfer_payloads: wait transfer "
++                      "%u/%u failed (err=%d errno=%d)",
++                      i, wait_count, err, saved_errno);
+             return vk_errorf(device, VK_ERROR_UNKNOWN,
+                              "DRM_IOCTL_SYNCOBJ_TRANSFER failed: %m");
+          }
+@@ -579,6 +608,9 @@
+       uint32_t tmp_syncobj;
+       int err = device->sync->create(device->sync, 0, &tmp_syncobj);
+       if (err) {
++         int saved_errno = errno;
++         mesa_loge("vk_drm_syncobj_transfer_payloads: temporary syncobj "
++                   "creation failed (err=%d errno=%d)", err, saved_errno);
+          return vk_errorf(device, VK_ERROR_UNKNOWN,
+                           "DRM_IOCTL_SYNCOBJ_CREATE failed: %m");
+       }
+@@ -590,6 +622,10 @@
+          err = device->sync->transfer(device->sync, tmp_syncobj, i + 1,
+                                       wait_sobj->syncobj, wait_value, 0);
+          if (err) {
++            int saved_errno = errno;
++            mesa_loge("vk_drm_syncobj_transfer_payloads: wait transfer "
++                      "%u/%u failed (err=%d errno=%d)",
++                      i, wait_count, err, saved_errno);
+             err = device->sync->destroy(device->sync, tmp_syncobj);
+             assert(err == 0);
+             return vk_errorf(device, VK_ERROR_UNKNOWN,
+@@ -652,11 +688,21 @@
+       return vk_drm_syncobj_signal_many(device, signal_count, signals);
+ 
+    if (vk_device_has_timeline_syncobj(device)) {
+-      return vk_drm_syncobj_transfer_payloads(device, wait_count, waits,
+-                                              signal_count, signals);
++      VkResult result = vk_drm_syncobj_transfer_payloads(
++         device, wait_count, waits, signal_count, signals);
++      if (result != VK_SUCCESS)
++         mesa_loge("vk_drm_syncobj_copy_payloads: timeline transfer failed "
++                   "(waits=%u signals=%u result=%d)",
++                   wait_count, signal_count, result);
++      return result;
+    } else {
+-      return vk_drm_copy_sync_file_payloads(device, wait_count, waits,
+-                                            signal_count, signals);
++      VkResult result = vk_drm_copy_sync_file_payloads(
++         device, wait_count, waits, signal_count, signals);
++      if (result != VK_SUCCESS)
++         mesa_loge("vk_drm_syncobj_copy_payloads: sync-file copy failed "
++                   "(waits=%u signals=%u result=%d)",
++                   wait_count, signal_count, result);
++      return result;
+    }
+ }
+ 

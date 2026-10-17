@@ -1,0 +1,21 @@
+From: PanVK Kbase Android worker <panvk-worker@localhost>
+Subject: [PATCH kbase-common/csf 021] panvk: force FIFO presentation on kbase
+
+Keep Kbase swapchain presentation on FIFO until mailbox/immediate buffer
+ownership synchronization has been validated on device.
+
+--- a/src/panfrost/vulkan/panvk_wsi.c
++++ b/src/panfrost/vulkan/panvk_wsi.c
+@@ -613,4 +613,12 @@
+    physical_device->wsi_device.disable_unordered_submits = uses_kbase;
+ 
++   /* Kbase presentation has not been validated with queueing present modes.
++    * Keep display ownership serialized until its present synchronization is
++    * proven to avoid reusing a buffer while it is still being scanned out.
++    */
++   if (uses_kbase)
++      physical_device->wsi_device.override_present_mode =
++         VK_PRESENT_MODE_FIFO_KHR;
++
+    /* kbase is not a DRM fd.  The default CPU WSI path presents through
+     * MIT-SHM.  Android dma-heaps can also provide shareable

@@ -1,0 +1,65 @@
+From: PanVK Build Environment
+Subject: [PATCH csf-v13 104] panvk: pass swapchain compression control to images
+
+Expose swapchain compression control only for Android WSI, and preserve the
+application's image compression policy when PanVK creates the backing images.
+
+diff --git a/src/panfrost/vulkan/panvk_vX_physical_device.c b/src/panfrost/vulkan/panvk_vX_physical_device.c
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -132,7 +132,10 @@
+       .KHR_swapchain = true,
+       .KHR_swapchain_mutable_format = true,
+       .KHR_swapchain_maintenance1 = true,
+ #endif
++#ifdef VK_USE_PLATFORM_ANDROID_KHR
++      .EXT_image_compression_control_swapchain = true,
++#endif
+       .KHR_synchronization2 = true,
+       .KHR_timeline_semaphore = true,
+       .KHR_unified_image_layouts = true,
+@@ -611,5 +611,8 @@
+       /* VK_EXT_image_compression_control */
+       .imageCompressionControl = true,
++#ifdef VK_USE_PLATFORM_ANDROID_KHR
++      .imageCompressionControlSwapchain = true,
++#endif
+ 
+       /* VK_EXT_image_sliced_view_of_3d */
+       .imageSlicedViewOf3D = true,
+diff --git a/src/panfrost/vulkan/panvk_wsi.c b/src/panfrost/vulkan/panvk_wsi.c
+--- a/src/panfrost/vulkan/panvk_wsi.c
++++ b/src/panfrost/vulkan/panvk_wsi.c
+@@ -330,3 +330,11 @@
+ {
+     VK_FROM_HANDLE(vk_device, dev, device);
++    const VkImageCompressionControlEXT *swapchain_compression =
++       vk_find_struct_const(pCreateInfo->pNext, IMAGE_COMPRESSION_CONTROL_EXT);
++    if (swapchain_compression &&
++        (swapchain_compression->flags &
++         (VK_IMAGE_COMPRESSION_FIXED_RATE_DEFAULT_EXT |
++          VK_IMAGE_COMPRESSION_FIXED_RATE_EXPLICIT_EXT)))
++       return VK_ERROR_FORMAT_NOT_SUPPORTED;
++
+     VkResult result;
+@@ -379,7 +379,20 @@
+       VkExternalMemoryImageCreateInfo emici = {
+          .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+          .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
+       };
++      VkImageCompressionControlEXT image_compression = {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT,
++         .flags = swapchain_compression ? swapchain_compression->flags
++                                        : VK_IMAGE_COMPRESSION_DEFAULT_EXT,
++         .compressionControlPlaneCount =
++            swapchain_compression
++               ? swapchain_compression->compressionControlPlaneCount
++               : 0,
++         .pFixedRateFlags =
++            swapchain_compression ? swapchain_compression->pFixedRateFlags : NULL,
++      };
++      if (swapchain_compression)
++         emici.pNext = &image_compression;
+       VkImageCreateInfo ici = {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+          .pNext = &emici,

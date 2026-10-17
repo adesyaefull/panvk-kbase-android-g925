@@ -1,0 +1,16 @@
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -452,9 +452,11 @@
+       .bufferDeviceAddress = true,
+       .accelerationStructure = PAN_ARCH >= 10,
+       .rayQuery = PAN_ARCH >= 10,
+-      /* only expose for CSF/panthor, and if we have extended VA ranges */
++      /* Kbase cannot preserve captured VAs; only expose on Panthor with an
++       * extended VA range. */
+       .bufferDeviceAddressCaptureReplay =
+-         (PAN_ARCH >= 10) && (device->memory.max_supported_va > (1ull << 32)),
++         (PAN_ARCH >= 10) && !device->kbase_node_path[0] &&
++         (device->memory.max_supported_va > (1ull << 32)),
+       .bufferDeviceAddressMultiDevice = false,
+       .vulkanMemoryModel = true,
+       .vulkanMemoryModelDeviceScope = true,

@@ -1,0 +1,181 @@
+--- a/src/panfrost/lib/kmod/pan_kmod.h
++++ b/src/panfrost/lib/kmod/pan_kmod.h
+@@ -630,6 +630,7 @@
+    struct pan_kmod_bo *bo;
+    uint64_t start;
+    uint64_t size;
++   void *cpu_ptr;
+    enum pan_kmod_bo_sync_type type;
+ };
+ 
+@@ -665,6 +666,7 @@
+    struct {
+       bool user_cache_ops_pending;
+       struct util_dynarray array;
++      struct util_dynarray user_cache_array;
+       simple_mtx_t lock;
+    } pending_bo_syncs;
+ 
+--- a/src/panfrost/lib/kmod/pan_kmod_backend.h
++++ b/src/panfrost/lib/kmod/pan_kmod_backend.h
+@@ -20,6 +20,8 @@
+                           sizeof(struct pan_kmod_bo *), 512);
+    simple_mtx_init(&dev->pending_bo_syncs.lock, mtx_plain);
+    util_dynarray_init(&dev->pending_bo_syncs.array, NULL);
++   util_dynarray_init(&dev->pending_bo_syncs.user_cache_array, NULL);
++   dev->pending_bo_syncs.user_cache_ops_pending = false;
+    dev->driver = *drv_info;
+    dev->fd = fd;
+    dev->flags = flags;
+@@ -34,6 +36,7 @@
+       close(dev->fd);
+ 
+    util_dynarray_fini(&dev->pending_bo_syncs.array);
++   util_dynarray_fini(&dev->pending_bo_syncs.user_cache_array);
+    util_sparse_array_finish(&dev->handle_to_bo.array);
+    simple_mtx_destroy(&dev->handle_to_bo.lock);
+    simple_mtx_destroy(&dev->pending_bo_syncs.lock);
+--- a/src/panfrost/lib/kmod/pan_kmod.c
++++ b/src/panfrost/lib/kmod/pan_kmod.c
+@@ -267,14 +267,32 @@
+ void
+ pan_kmod_flush_bo_map_syncs_locked(struct pan_kmod_dev *dev)
+ {
+-   ASSERTED int ret = dev->ops->flush_bo_map_syncs(dev);
+-   assert(!ret);
++   if (util_dynarray_num_elements(&dev->pending_bo_syncs.user_cache_array,
++                                  struct pan_kmod_deferred_bo_sync)) {
++      util_dynarray_foreach(&dev->pending_bo_syncs.user_cache_array,
++                            struct pan_kmod_deferred_bo_sync, sync) {
++         util_pre_flush_fence();
++         if (sync->type == PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH)
++            util_flush_range_no_fence(sync->cpu_ptr, sync->size);
++         else
++            util_flush_inval_range_no_fence(sync->cpu_ptr, sync->size);
++         sync->bo->has_pending_deferred_syncs = false;
++      }
++      util_dynarray_clear(&dev->pending_bo_syncs.user_cache_array);
++      util_post_flush_inval_fence();
++      p_atomic_set(&dev->pending_bo_syncs.user_cache_ops_pending, false);
++   }
+ 
+    util_dynarray_foreach(&dev->pending_bo_syncs.array,
+                          struct pan_kmod_deferred_bo_sync, sync)
+       sync->bo->has_pending_deferred_syncs = false;
+ 
+-   util_dynarray_clear(&dev->pending_bo_syncs.array);
++   if (util_dynarray_num_elements(&dev->pending_bo_syncs.array,
++                                  struct pan_kmod_deferred_bo_sync)) {
++      ASSERTED int ret = dev->ops->flush_bo_map_syncs(dev);
++      assert(!ret);
++      util_dynarray_clear(&dev->pending_bo_syncs.array);
++   }
+ }
+ 
+ int
+@@ -292,21 +310,17 @@
+    if (dev->props.is_io_coherent)
+       return;
+ 
+-   /* Barrier to make sure all flush/invalidate requests are effective. */
+-   if (p_atomic_xchg(&dev->pending_bo_syncs.user_cache_ops_pending, false))
+-      util_post_flush_inval_fence();
+-
+-   /* This can be racy, but that's fine, because we expect a future call to
+-    * pan_kmod_flush_bo_map_syncs() if new ops are being added while we check
+-    * this value.
+-    */
+-   if (!util_dynarray_num_elements(&dev->pending_bo_syncs.array,
++   if (!p_atomic_read(&dev->pending_bo_syncs.user_cache_ops_pending) &&
++       !util_dynarray_num_elements(&dev->pending_bo_syncs.array,
++                                   struct pan_kmod_deferred_bo_sync) &&
++       !util_dynarray_num_elements(&dev->pending_bo_syncs.user_cache_array,
+                                    struct pan_kmod_deferred_bo_sync))
+       return;
+ 
+    simple_mtx_lock(&dev->pending_bo_syncs.lock);
+    pan_kmod_flush_bo_map_syncs_locked(dev);
+    simple_mtx_unlock(&dev->pending_bo_syncs.lock);
++
+ }
+ 
+ /* Arbitrary limit for now. Pick something bigger or make it configurable if it
+@@ -325,30 +339,53 @@
+     * cacheable.
+     */
+    if (!(bo->flags & PAN_KMOD_BO_FLAG_WB_MMAP) ||
+-       (bo->flags & PAN_KMOD_BO_FLAG_IO_COHERENT))
++       (bo->flags & PAN_KMOD_BO_FLAG_IO_COHERENT) || !range)
+       return;
+ 
+    /* If we have userspace cache flushing ops, use them instead of trapping
+     * through to the kernel.
+     */
+    if (pan_kmod_can_sync_bo_map_from_userland(dev)) {
+-      /* Pre-flush needs to be executed before each flush/inval operation, but
+-       * we can batch the post flush/inval fence. util_pre_flush_fence() being
+-       * a NOP on aarch64, it's effectively free there, but we keep it here for
+-       * clarity (not sure we care about Mali on x86 to be honest :D).
+-       */
+-      util_pre_flush_fence();
+-
+-      if (type == PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH)
+-         util_flush_range_no_fence(cpu_ptr, range);
+-      else
+-         util_flush_inval_range_no_fence(cpu_ptr, range);
+-
+-      /* The util_pre_flush_inval_fence() is inserted by
+-       * pan_kmod_flush_bo_map_syncs() to avoid unnecessary serialization when
+-       * flush/invalidate operations are batched.
+-       */
++      simple_mtx_lock(&dev->pending_bo_syncs.lock);
++
++      if (util_dynarray_num_elements(&dev->pending_bo_syncs.user_cache_array,
++                                     struct pan_kmod_deferred_bo_sync) >=
++          MAX_PENDING_SYNC_OPS)
++         pan_kmod_flush_bo_map_syncs_locked(dev);
++
++      uint64_t start = bo_offset & ~((uint64_t)util_cache_granularity() - 1);
++      uint64_t end = ALIGN_POT(bo_offset + range, util_cache_granularity());
++      uint8_t *bo_cpu_ptr = (uint8_t *)cpu_ptr - bo_offset;
++
++      util_dynarray_foreach(&dev->pending_bo_syncs.user_cache_array,
++                            struct pan_kmod_deferred_bo_sync, sync) {
++         uint64_t sync_end = sync->start + sync->size;
++
++         if (sync->bo == bo && sync->type == type &&
++             start <= sync_end && sync->start <= end) {
++            uint64_t merged_start = MIN2(start, sync->start);
++            uint64_t merged_end = MAX2(end, sync_end);
++            sync->start = merged_start;
++            sync->size = merged_end - merged_start;
++            sync->cpu_ptr = bo_cpu_ptr + merged_start;
++            bo->has_pending_deferred_syncs = true;
++            p_atomic_set(&dev->pending_bo_syncs.user_cache_ops_pending, true);
++            simple_mtx_unlock(&dev->pending_bo_syncs.lock);
++            return;
++         }
++      }
++
++      struct pan_kmod_deferred_bo_sync new_sync = {
++         .bo = bo,
++         .start = start,
++         .size = end - start,
++         .cpu_ptr = bo_cpu_ptr + start,
++         .type = type,
++      };
++      bo->has_pending_deferred_syncs = true;
++      util_dynarray_append(&dev->pending_bo_syncs.user_cache_array, new_sync);
+       p_atomic_set(&dev->pending_bo_syncs.user_cache_ops_pending, true);
++      simple_mtx_unlock(&dev->pending_bo_syncs.lock);
+       return;
+    }
+ 
+@@ -387,6 +424,7 @@
+       .bo = bo,
+       .start = start,
+       .size = end - start,
++      .cpu_ptr = NULL,
+       .type = type,
+    };
+ 

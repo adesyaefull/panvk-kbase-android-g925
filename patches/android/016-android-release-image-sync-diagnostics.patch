@@ -1,0 +1,45 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH android 016] identify Android release-image sync failures
+
+Purpose: Distinguish semaphore initialization, QueueSubmit2, and sync-file
+export failures in vkQueueSignalReleaseImageANDROID. The G925 test log reports
+VK_ERROR_UNKNOWN from the extension while repeatedly recreating the Android
+swapchain.
+Validation: Android arm64/API 35 source compile; runtime retest required.
+Dependencies: 014-ahb-native-buffer-import-fd-scan.patch.
+
+diff --git a/src/vulkan/runtime/vk_android.c b/src/vulkan/runtime/vk_android.c
+--- a/src/vulkan/runtime/vk_android.c
++++ b/src/vulkan/runtime/vk_android.c
+@@ -628,3 +628,5 @@
+    result = vk_anb_semaphore_init_once(queue, device);
+    if (result != VK_SUCCESS)
+-      return result;
++      return vk_errorf(
++         device, result,
++         "vkQueueSignalReleaseImageANDROID: semaphore initialization failed");
+@@ -661,14 +661,21 @@
+    STACK_ARRAY_FINISH(wait_infos);
+    if (result != VK_SUCCESS)
+-      return result;
++      return vk_errorf(device, result,
++                       "vkQueueSignalReleaseImageANDROID: QueueSubmit2 failed");
+ 
+    const VkSemaphoreGetFdInfoKHR get_fd = {
+       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+       .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+       .semaphore = queue->anb_semaphore,
+    };
+-   return device->dispatch_table.GetSemaphoreFdKHR(vk_device_to_handle(device),
+-                                                   &get_fd, pNativeFenceFd);
++   result = device->dispatch_table.GetSemaphoreFdKHR(vk_device_to_handle(device),
++                                                     &get_fd, pNativeFenceFd);
++   if (result != VK_SUCCESS)
++      return vk_errorf(
++         device, result,
++         "vkQueueSignalReleaseImageANDROID: GetSemaphoreFdKHR failed");
++
++   return VK_SUCCESS;
+ }
+ 
+ #if ANDROID_API_LEVEL >= 26

@@ -1,0 +1,26 @@
+G925 VK_EXT_pipeline_protected_access runtime verification
+Date: 2026-10-15
+Device: OnePlus 2602BPC18G, Mali-G925
+PanProbe package: dev.zenithblue.panvktest 1.2.4 debug
+PanProbe APK SHA-256: edefd37b49bff722dfa15f5f07d293fe76eb776e21746527c8dc36e3cd8fa327
+ICD Build ID: 6d024e6a1b66076aeadd502408f5f4b033c0c9f2
+ICD SHA-256: f373e28df2a2f0a35192032e5602211cc9a23eafb3a70f8fbb93e6ec73353e37
+
+Observed through PanProbe's bundled-ICD Vulkan info query:
+- Device name: PanVK-Mali-G925
+- VK_EXT_pipeline_protected_access is enumerated.
+- VkPhysicalDevicePipelineProtectedAccessFeatures.pipelineProtectedAccess=true.
+
+The protected_memory PanProbe test created a VkDevice with
+VK_EXT_pipeline_protected_access enabled and the queried feature enabled:
+
+PIPELINE_PROTECTED_ACCESS PASS feature-enable
+
+Protected allocation was separately skipped, as expected:
+
+MESA: info: kbase: protected allocation probe was not marked protected (query flags 0x280c)
+SKIP protectedMemory feature is not supported
+
+The Kbase query result 0x280c does not contain KBASE_REG_PROTECTED (bit 19).
+This verifies the pipeline feature only; it does not claim protected-memory
+allocation support.

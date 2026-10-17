@@ -1,0 +1,19 @@
+{
+  "profile": "g925-v13-csf",
+  "packageName": "PanVK-Mali-G925",
+  "device": "G925 Android device (hardware validation pending)",
+  "gpu": "Mali-G925",
+  "mesaModel": "Mali-G725 (PAN_ARCH 13)",
+  "gpuId": "0xd8300010",
+  "kernelGpuId": "0xd8300015",
+  "gpuIdString": "Mali-G925-Immortalis 0xd8300010 (kernel reports 0xd8300015)",
+  "vendorID": "0x13b5",
+  "deviceName": "PanVK-Mali-G925",
+  "panArch": 13,
+  "frontend": "CSF",
+  "kernelInterface": "mali_kbase",
+  "reportedMemoryHeapBytes": 11759542272,
+  "reportedMemoryHeapMiB": 11214.7734375,
+  "reportedProtectedMemoryHeapBytes": 104857600,
+  "status": "GPU identity 0xd8300010 and device name PanVK-Mali-G925 are reported when the kernel identifies the target as 0xd8300015 or 0xd8300010; G925 Vulkan memory properties mirror the official 11,759,542,272-byte device-local heap, three unprotected memory types, and 104,857,600-byte protected heap when supported; heap budget tracks allocations per heap; runtime remains unvalidated; robustImageAccess2 and Android swapchain image-compression control wiring are build-verified; the other 10 GPUInfo-only extensions remain unimplemented"
+}

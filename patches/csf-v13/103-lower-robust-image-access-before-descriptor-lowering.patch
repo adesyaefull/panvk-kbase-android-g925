@@ -1,0 +1,60 @@
+From: PanVK Build Environment
+Subject: [PATCH csf-v13 103] panvk: lower robust image accesses before descriptors
+
+Run Mesa's robust-access lowering while image dereferences are still present,
+so out-of-bounds image operations are guarded before PanVK lowers descriptors.
+Expose robustImageAccess2 only on architectures using this implementation.
+
+diff --git a/src/panfrost/vulkan/panvk_vX_physical_device.c b/src/panfrost/vulkan/panvk_vX_physical_device.c
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -650,6 +650,6 @@
+       /* VK_KHR_robustness2 */
+       .robustBufferAccess2 = PAN_ARCH >= 11,
+-      .robustImageAccess2 = false,
++      .robustImageAccess2 = PAN_ARCH >= 11,
+       .nullDescriptor = PAN_ARCH >= 10,
+ 
+       /* VK_EXT_shader_tile_image */
+diff --git a/src/panfrost/vulkan/panvk_vX_shader.c b/src/panfrost/vulkan/panvk_vX_shader.c
+--- a/src/panfrost/vulkan/panvk_vX_shader.c
++++ b/src/panfrost/vulkan/panvk_vX_shader.c
+@@ -2521,8 +2521,22 @@
+    default:
+       return false;
+    }
+ }
+ 
++static bool
++is_robust_image_intr(const nir_intrinsic_instr *intr, UNUSED const void *data)
++{
++   switch (intr->intrinsic) {
++   case nir_intrinsic_image_deref_load:
++   case nir_intrinsic_image_deref_store:
++   case nir_intrinsic_image_deref_atomic:
++   case nir_intrinsic_image_deref_atomic_swap:
++      return true;
++   default:
++      return false;
++   }
++}
++
+ static bool
+ valhall_lower_get_ssbo_size(struct nir_builder *b,
+                             nir_intrinsic_instr *intr, void *data)
+@@ -2803,5 +2813,15 @@
+    if (PAN_ARCH < 9)
+       NIR_PASS(_, nir, pan_nir_lower_image_ms);
+ 
++   /* Keep image derefs intact so the bounds queries can be lowered with the
++    * descriptors below.
++    */
++   if (dev->vk.enabled_features.robustImageAccess2 ||
++       rs->images != VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT) {
++      NIR_PASS(_, nir, nir_lower_robust_access, is_robust_image_intr, NULL);
++      NIR_PASS(_, nir, nir_opt_constant_folding);
++      NIR_PASS(_, nir, nir_opt_dce);
++   }
++
+    panvk_per_arch(nir_lower_descriptors)(nir, dev, rs, set_layout_count,
+                                          set_layouts, state, desc_info);

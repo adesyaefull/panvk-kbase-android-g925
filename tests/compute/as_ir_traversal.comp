@@ -1,0 +1,295 @@
+#version 460
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer AccelerationStructure {
+   uint words[];
+} as_data;
+
+layout(set = 0, binding = 1, std430) writeonly buffer Results {
+   uvec4 values[];
+} results;
+
+layout(set = 0, binding = 2, std430) readonly buffer TopLevelAccelerationStructure {
+   uint words[];
+} tlas_data;
+
+layout(push_constant) uniform Dispatch {
+   uint root_id;
+   uint ray_count;
+   float t_min;
+   float t_max;
+   uint use_tlas_instance;
+   uint expected_blas_address_low;
+   uint expected_blas_address_high;
+   uint tlas_root_id;
+   uint query_decision;
+} dispatch;
+
+bool
+intersect_bounds(vec3 origin, vec3 direction, uint node_offset)
+{
+   float near_t = 0.0;
+   float far_t = 1e30;
+
+   for (uint axis = 0; axis < 3; axis++) {
+      float minimum = uintBitsToFloat(as_data.words[node_offset + axis]);
+      float maximum = uintBitsToFloat(as_data.words[node_offset + 3 + axis]);
+      if (abs(direction[axis]) < 1e-8) {
+         if (origin[axis] < minimum || origin[axis] > maximum)
+            return false;
+      } else {
+         float inverse_direction = 1.0 / direction[axis];
+         float t0 = (minimum - origin[axis]) * inverse_direction;
+         float t1 = (maximum - origin[axis]) * inverse_direction;
+         near_t = max(near_t, min(t0, t1));
+         far_t = min(far_t, max(t0, t1));
+      }
+   }
+
+   return far_t >= near_t;
+}
+
+bool
+intersect_tlas_bounds(vec3 origin, vec3 direction, uint node_offset)
+{
+   float near_t = 0.0;
+   float far_t = 1e30;
+
+   for (uint axis = 0; axis < 3; axis++) {
+      float minimum = uintBitsToFloat(tlas_data.words[node_offset + axis]);
+      float maximum = uintBitsToFloat(tlas_data.words[node_offset + 3 + axis]);
+      if (abs(direction[axis]) < 1e-8) {
+         if (origin[axis] < minimum || origin[axis] > maximum)
+            return false;
+      } else {
+         float inverse_direction = 1.0 / direction[axis];
+         float t0 = (minimum - origin[axis]) * inverse_direction;
+         float t1 = (maximum - origin[axis]) * inverse_direction;
+         near_t = max(near_t, min(t0, t1));
+         far_t = min(far_t, max(t0, t1));
+      }
+   }
+
+   return far_t >= near_t;
+}
+
+bool
+intersect_triangle(vec3 origin, vec3 direction, uint node_offset,
+                   out float distance)
+{
+   vec3 v0 = vec3(uintBitsToFloat(as_data.words[node_offset + 6]),
+                  uintBitsToFloat(as_data.words[node_offset + 7]),
+                  uintBitsToFloat(as_data.words[node_offset + 8]));
+   vec3 v1 = vec3(uintBitsToFloat(as_data.words[node_offset + 9]),
+                  uintBitsToFloat(as_data.words[node_offset + 10]),
+                  uintBitsToFloat(as_data.words[node_offset + 11]));
+   vec3 v2 = vec3(uintBitsToFloat(as_data.words[node_offset + 12]),
+                  uintBitsToFloat(as_data.words[node_offset + 13]),
+                  uintBitsToFloat(as_data.words[node_offset + 14]));
+   vec3 edge1 = v1 - v0;
+   vec3 edge2 = v2 - v0;
+   vec3 p = cross(direction, edge2);
+   float determinant = dot(edge1, p);
+   if (abs(determinant) < 1e-7)
+      return false;
+
+   float inverse_determinant = 1.0 / determinant;
+   vec3 t = origin - v0;
+   float u = dot(t, p) * inverse_determinant;
+   if (u < 0.0 || u > 1.0)
+      return false;
+
+   vec3 q = cross(t, edge1);
+   float v = dot(direction, q) * inverse_determinant;
+   if (v < 0.0 || u + v > 1.0)
+      return false;
+
+   distance = dot(edge2, q) * inverse_determinant;
+   return distance >= 0.0;
+}
+
+void
+main()
+{
+   uint ray = gl_GlobalInvocationID.x;
+   if (ray >= dispatch.ray_count)
+      return;
+
+   uint scenario = ray & 3u;
+   uint local_ray = ray & 15u;
+   uint instance_index = ray / 16u;
+   uint output_index = dispatch.query_decision * dispatch.ray_count * 2u +
+                       ray * 2u;
+   uint target_primitive = (local_ray / 4) * 64;
+   float ray_x = float(target_primitive * 2) +
+                 (scenario == 1 ? 1.2 : 0.2);
+   vec3 origin = vec3(ray_x, 0.2, -1.0);
+   vec3 direction = vec3(0.0, 0.0, 1.0);
+   if (dispatch.use_tlas_instance != 0) {
+      uint ray_mask = local_ray == 0
+                         ? 0x80u
+                         : (local_ray == 4
+                               ? 0x40u
+                               : (local_ray == 8 ? 0x20u : 0x10u));
+
+      if (instance_index == 0) {
+         origin = vec3(ray_x * 2.0 + 3.0, 3.0, 0.6);
+         direction = vec3(0.0, -1.0, 0.0);
+      } else if (instance_index == 1u) {
+         origin = vec3(ray_x + 1100.0, 0.2, -1.0);
+         direction = vec3(0.0, 0.0, 1.0);
+      } else if (instance_index == 2u) {
+         origin = vec3(ray_x + 2200.0, 0.2, -1.0);
+         direction = vec3(0.0, 0.0, 1.0);
+      } else {
+         origin = vec3(ray_x + 3300.0, 0.2, -1.0);
+         direction = vec3(0.0, 0.0, 1.0);
+      }
+
+      uint tlas_stack[16];
+      uint tlas_stack_size = 0;
+      tlas_stack[tlas_stack_size++] = dispatch.tlas_root_id;
+      uint selected_instance_offset = 0xffffffffu;
+      uint tlas_visits = 0;
+      while (tlas_stack_size > 0) {
+         if (++tlas_visits > 16) {
+            results.values[output_index] = uvec4(0xffffffff);
+            return;
+         }
+
+         uint node_id = tlas_stack[--tlas_stack_size];
+         uint node_offset = 32 + (node_id & ~3u) / 4;
+         if (!intersect_tlas_bounds(origin, direction, node_offset))
+            continue;
+
+         uint node_type = node_id & 3u;
+         if (node_type == 1u) {
+            uint left = tlas_data.words[node_offset + 6];
+            uint right = tlas_data.words[node_offset + 7];
+            if (left != 0xffffffffu) {
+               if (tlas_stack_size >= 16) {
+                  results.values[output_index] = uvec4(0xffffffff);
+                  return;
+               }
+               tlas_stack[tlas_stack_size++] = left;
+            }
+            if (right != 0xffffffffu) {
+               if (tlas_stack_size >= 16) {
+                  results.values[output_index] = uvec4(0xffffffff);
+                  return;
+               }
+               tlas_stack[tlas_stack_size++] = right;
+            }
+         } else if (node_type == 2u) {
+            uint mask = (tlas_data.words[node_offset + 8] >> 24) & 0xffu;
+            if ((mask & ray_mask) == 0)
+               continue;
+            if (tlas_data.words[node_offset + 22] != instance_index ||
+                tlas_data.words[node_offset + 6] !=
+                   dispatch.expected_blas_address_low ||
+                tlas_data.words[node_offset + 7] !=
+                   dispatch.expected_blas_address_high) {
+               results.values[output_index] = uvec4(0xffffffff);
+               return;
+            }
+            selected_instance_offset = node_offset;
+            break;
+         } else {
+            results.values[output_index] = uvec4(0xffffffff);
+            return;
+         }
+      }
+
+      if (selected_instance_offset == 0xffffffffu) {
+         results.values[output_index] =
+            uvec4(0u, 0xffffffffu, 0xffffffffu, 0u);
+         results.values[output_index + 1u] =
+            uvec4(0u, 0xffffffffu, 0xffffffffu, 0u);
+         return;
+      }
+
+      mat3 object_to_world = mat3(
+         vec3(uintBitsToFloat(tlas_data.words[selected_instance_offset + 10]),
+          uintBitsToFloat(tlas_data.words[selected_instance_offset + 14]),
+          uintBitsToFloat(tlas_data.words[selected_instance_offset + 18])),
+         vec3(uintBitsToFloat(tlas_data.words[selected_instance_offset + 11]),
+          uintBitsToFloat(tlas_data.words[selected_instance_offset + 15]),
+          uintBitsToFloat(tlas_data.words[selected_instance_offset + 19])),
+         vec3(uintBitsToFloat(tlas_data.words[selected_instance_offset + 12]),
+          uintBitsToFloat(tlas_data.words[selected_instance_offset + 16]),
+          uintBitsToFloat(tlas_data.words[selected_instance_offset + 20])));
+      vec3 translation =
+         vec3(uintBitsToFloat(tlas_data.words[selected_instance_offset + 13]),
+          uintBitsToFloat(tlas_data.words[selected_instance_offset + 17]),
+          uintBitsToFloat(tlas_data.words[selected_instance_offset + 21]));
+      mat3 world_to_object = inverse(object_to_world);
+      origin = world_to_object * (origin - translation);
+      direction = world_to_object * direction;
+   }
+
+   float ray_min = scenario == 3 ? (instance_index == 0 ? 2.2 : 1.3) : 0.0;
+   float ray_max = scenario == 2 ? 0.5 : 100.0;
+
+   uint stack[32];
+   uint stack_size = 0;
+   stack[stack_size++] = dispatch.root_id;
+   float closest = 1e30;
+   uint closest_primitive = 0xffffffff;
+   uint closest_geometry = 0xffffffff;
+   uint visited_nodes = 0;
+
+   while (stack_size > 0) {
+      if (++visited_nodes > 1024) {
+         results.values[output_index] = uvec4(0xffffffff);
+         return;
+      }
+
+      uint node_id = stack[--stack_size];
+      uint node_offset = 32 + (node_id & ~3u) / 4;
+      if (!intersect_bounds(origin, direction, node_offset))
+         continue;
+
+      if ((node_id & 3u) == 1u) {
+         uint left = as_data.words[node_offset + 6];
+         uint right = as_data.words[node_offset + 7];
+         uint child_count = uint(left != 0xffffffff) +
+                            uint(right != 0xffffffff);
+         if (stack_size + child_count > 32) {
+            results.values[output_index] = uvec4(0xffffffff);
+            return;
+         }
+         if (left != 0xffffffff)
+            stack[stack_size++] = left;
+         if (right != 0xffffffff)
+            stack[stack_size++] = right;
+      } else if ((node_id & 3u) == 0u) {
+         float distance;
+         if (intersect_triangle(origin, direction, node_offset, distance) &&
+             distance >= ray_min && distance <= ray_max &&
+             distance >= dispatch.t_min && distance <= dispatch.t_max &&
+             distance < closest) {
+            closest = distance;
+            closest_primitive = as_data.words[node_offset + 15];
+            closest_geometry = as_data.words[node_offset + 16];
+         }
+      }
+   }
+
+   bool candidate_found = closest_primitive != 0xffffffffu;
+   uvec4 candidate =
+      uvec4(candidate_found ? 1u : 0u, closest_primitive,
+            closest_geometry, floatBitsToUint(closest));
+   bool candidate_opaque =
+      candidate_found && dispatch.query_decision == 2u &&
+      (closest_geometry & 0x80000000u) != 0u;
+   bool commit_candidate =
+      candidate_found &&
+      (dispatch.query_decision == 1u ||
+       (dispatch.query_decision == 2u && candidate_opaque));
+   uvec4 committed =
+      commit_candidate ? candidate
+                       : uvec4(0u, 0xffffffffu, 0xffffffffu, 0u);
+   results.values[output_index] = candidate;
+   results.values[output_index + 1u] = committed;
+}

@@ -1,0 +1,16 @@
+--- a/src/panfrost/lib/kmod/kbase_kmod.c
++++ b/src/panfrost/lib/kmod/kbase_kmod.c
+@@ -2123,7 +2123,11 @@
+       return NULL;
+    }
+ 
+-   pan_kmod_vm_init(&kbase_vm->base, dev, 0 /* no kernel handle */, flags);
++   /* Kbase assigns GPU VAs when BOs are allocated and cannot honor a later
++    * caller-selected mapping. Keep the VM contract in AUTO_VA mode regardless
++    * of which PanVK device-enumeration path selected this backend. */
++   pan_kmod_vm_init(&kbase_vm->base, dev, 0 /* no kernel handle */,
++                    flags | PAN_KMOD_VM_FLAG_AUTO_VA);
+    return &kbase_vm->base;
+ }
+ 
+ static void

@@ -1,0 +1,33 @@
+diff --git a/src/panfrost/vulkan/panvk_vX_physical_device.c b/src/panfrost/vulkan/panvk_vX_physical_device.c
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -813,6 +813,8 @@
+    os_get_page_size(&os_page_size);
+ 
+    const bool has_disk_cache = device->vk.disk_cache != NULL;
++   const uint32_t gpu_id = device->kmod.dev->props.gpu_id;
++   const bool is_g925_device = gpu_id == 0xd8300015 || gpu_id == 0xd8300010;
+ 
+    /* Ensure that the max threads count per workgroup is valid for Bifrost */
+    assert(PAN_ARCH > 8 || device->kmod.dev->props.max_threads_per_wg <= 1024);
+@@ -834,7 +836,7 @@
+       .driverVersion = vk_get_driver_version(),
+       .vendorID =
+          instance->drirc.debug.force_vk_vendor ? instance->drirc.debug.force_vk_vendor : ARM_VENDOR_ID,
+-      .deviceID = device->kmod.dev->props.gpu_id,
++      .deviceID = is_g925_device ? 0xd8300010 : gpu_id,
+       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
+ 
+       /* Vulkan 1.0 limits */
+@@ -1311,9 +1313,10 @@
+       .supportedQueues = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT,
+    };
+ 
++   const char *device_name = is_g925_device ? "PanVK-Mali-G925" : device->name;
+    snprintf(properties->deviceName, sizeof(properties->deviceName), "%s",
+             (strlen(instance->drirc.debug.force_vk_devicename) > 0) ?
+-            instance->drirc.debug.force_vk_devicename : device->name);
++            instance->drirc.debug.force_vk_devicename : device_name);
+ 
+    memcpy(properties->pipelineCacheUUID, device->cache_uuid, VK_UUID_SIZE);
+    memcpy(properties->shaderBinaryUUID, device->cache_uuid, VK_UUID_SIZE);

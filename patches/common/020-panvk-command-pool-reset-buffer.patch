@@ -1,0 +1,51 @@
+--- a/src/panfrost/vulkan/panvk_cmd_pool.c
++++ b/src/panfrost/vulkan/panvk_cmd_pool.c
+@@ -31,8 +31,11 @@
+                     VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+    if (pool == NULL)
+       return panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
++   VkCommandPoolCreateInfo create_info = *pCreateInfo;
++   create_info.flags |= VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
++
+    VkResult result =
+-      vk_command_pool_init(&device->vk, &pool->vk, pCreateInfo, pAllocator);
++      vk_command_pool_init(&device->vk, &pool->vk, &create_info, pAllocator);
+    if (result != VK_SUCCESS) {
+       vk_free2(&device->vk.alloc, pAllocator, pool);
+       return result;
+*** Add File: /home/ade/PanVK_Build_Environment/panvk-kbase-android-upstream/tests/dxvk-vkd3d/test_panvk_command_pool_reset.py
+#!/usr/bin/env python3
+import pathlib
+import re
+import unittest
+
+from _mesa_tree import mesa_root
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+SOURCE = mesa_root() / "src/panfrost/vulkan/panvk_cmd_pool.c"
+PATCH = ROOT / "patches/common/020-panvk-command-pool-reset-buffer.patch"
+
+
+class PanvkCommandPoolResetTest(unittest.TestCase):
+    def test_command_pools_enable_individual_buffer_reset(self):
+        source = SOURCE.read_text()
+        self.assertRegex(
+            source,
+            re.compile(
+                r"VkCommandPoolCreateInfo create_info = \*pCreateInfo;\s*"
+                r"create_info\.flags \|= "
+                r"VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;\s*"
+                r"VkResult result =\s*"
+                r"vk_command_pool_init\(&device->vk, &pool->vk, "
+                r"&create_info, pAllocator\);"
+            ),
+        )
+        self.assertIn(
+            "VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT",
+            PATCH.read_text(),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

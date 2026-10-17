@@ -1,0 +1,30 @@
+{
+  "devices": [
+    {
+      "device": "POCO X8 Pro Max",
+      "model": "2602BPC18G",
+      "codename": "dash",
+      "soc": "Dimensity 9500s",
+      "socId": "MT6897",
+      "gpu": "Immortalis-G925 MC11",
+      "gpuId": "0xb8a31030",
+      "panArch": 11,
+      "frontend": "CSF",
+      "kbaseUapi": "1.21",
+      "kernelInterface": "mali_kbase",
+      "android": "16 (SDK 36, OS3.0.6.0.WNLMIXM)",
+      "kernel": "6.1.170-GKID/v26.05.08-r326/94924f211",
+      "node": "/dev/mali0",
+      "driverProfile": "g925-v13-csf",
+      "androidLoader": "pass",
+      "androidWsi": "pass",
+      "glibc": "pass",
+      "sambaS3": "untested",
+      "bachataS4": "untested",
+      "winlator": "untested",
+      "gamehub": "untested"
+    }
+  ],
+  "note": "One phone's result is never inferred to every phone with the same GPU; Kbase UAPI/DDK differences matter."
+}
+

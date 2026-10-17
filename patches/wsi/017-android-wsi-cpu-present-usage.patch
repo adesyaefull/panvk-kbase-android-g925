@@ -1,0 +1,149 @@
+From: PanVK Build Environment
+Subject: [PATCH wsi 017] panvk: make Android CPU presentation buffers writable
+
+Request software-write usage before Android allocates the window buffers,
+advertise only the RGBA format actually copied by the WSI path, and report
+native lock/post failures instead of returning a successful black frame.
+
+diff --git a/src/panfrost/vulkan/panvk_wsi.c b/src/panfrost/vulkan/panvk_wsi.c
+--- a/src/panfrost/vulkan/panvk_wsi.c
++++ b/src/panfrost/vulkan/panvk_wsi.c
+@@ -50,6 +50,7 @@
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
+ #include <android/native_window.h>
+ #include <android/hardware_buffer.h>
++#include <vndk/window.h>
+ #include "wsi_common_private.h"
+ #include "panvk_android.h"
+ #include "panvk_device.h"
+@@ -106,5 +107,3 @@
+    static const VkSurfaceFormatKHR formats[] = {
+       { VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+-      { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+-      { VK_FORMAT_R8G8B8A8_SRGB,  VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+    };
+@@ -135,5 +134,3 @@
+    static const VkSurfaceFormatKHR formats[] = {
+       { VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+-      { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+-      { VK_FORMAT_R8G8B8A8_SRGB,  VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+    };
+@@ -270,23 +268,63 @@
+    VK_FROM_HANDLE(vk_device, dev, swapchain->device);
+-   dev->dispatch_table.DeviceWaitIdle(swapchain->device);
+-
+-   if (chain->window && chain->images[image_index].ahb) {
+-      ANativeWindow_Buffer win_buf;
+-      if (ANativeWindow_lock(chain->window, &win_buf, NULL) == 0) {
+-         void *ahb_data = NULL;
+-         AHardwareBuffer_Desc desc;
+-         AHardwareBuffer_describe(chain->images[image_index].ahb, &desc);
+-         if (AHardwareBuffer_lock(chain->images[image_index].ahb,
+-                                  AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL, &ahb_data) == 0) {
+-            uint32_t copy_h = win_buf.height < (int)desc.height ? (uint32_t)win_buf.height : desc.height;
+-            uint32_t copy_w = win_buf.width < (int)desc.width ? (uint32_t)win_buf.width : desc.width;
+-            for (uint32_t y = 0; y < copy_h; y++) {
+-               memcpy((char *)win_buf.bits + y * win_buf.stride * 4,
+-                      (char *)ahb_data + y * desc.stride * 4,
+-                      copy_w * 4);
+-            }
+-            AHardwareBuffer_unlock(chain->images[image_index].ahb, NULL);
+-         }
+-         ANativeWindow_unlockAndPost(chain->window);
+-      }
+-   }
++   VkResult result = dev->dispatch_table.DeviceWaitIdle(swapchain->device);
++   if (result != VK_SUCCESS)
++      return result;
++
++   if (!chain->window || !chain->images[image_index].ahb)
++      return panvk_errorf(swapchain->device, VK_ERROR_SURFACE_LOST_KHR,
++                          "Android swapchain has no present buffer");
++
++   ANativeWindow_Buffer win_buf;
++   int window_lock_result = ANativeWindow_lock(chain->window, &win_buf, NULL);
++   if (window_lock_result != 0)
++      return panvk_errorf(swapchain->device, VK_ERROR_SURFACE_LOST_KHR,
++                          "ANativeWindow_lock failed: %d",
++                          window_lock_result);
++
++   void *ahb_data = NULL;
++   AHardwareBuffer_Desc desc;
++   AHardwareBuffer_describe(chain->images[image_index].ahb, &desc);
++   int ahb_lock_result =
++      AHardwareBuffer_lock(chain->images[image_index].ahb,
++                           AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL,
++                           &ahb_data);
++   if (ahb_lock_result != 0) {
++      const int post_result = ANativeWindow_unlockAndPost(chain->window);
++      return panvk_errorf(
++         swapchain->device, VK_ERROR_SURFACE_LOST_KHR,
++         "AHardwareBuffer_lock failed: %d (window_post=%d)",
++         ahb_lock_result, post_result);
++   }
++
++   if (!ahb_data || !win_buf.bits || win_buf.width <= 0 ||
++       win_buf.height <= 0 || desc.width == 0 || desc.height == 0 ||
++       desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM ||
++       win_buf.format != WINDOW_FORMAT_RGBA_8888 ||
++       win_buf.stride < (int)desc.width || desc.stride < desc.width) {
++      const int ahb_unlock_result =
++         AHardwareBuffer_unlock(chain->images[image_index].ahb, NULL);
++      const int post_result = ANativeWindow_unlockAndPost(chain->window);
++      return panvk_errorf(
++         swapchain->device, VK_ERROR_SURFACE_LOST_KHR,
++         "Android present buffer invalid: ahb_format=%u window_format=%d "
++         "ahb_unlock=%d window_post=%d",
++         desc.format, win_buf.format, ahb_unlock_result, post_result);
++   }
++
++   const uint32_t copy_h =
++      MIN2((uint32_t)win_buf.height, desc.height);
++   const uint32_t copy_w =
++      MIN2((uint32_t)win_buf.width, desc.width);
++   for (uint32_t y = 0; y < copy_h; y++) {
++      memcpy((char *)win_buf.bits + y * win_buf.stride * 4,
++             (char *)ahb_data + y * desc.stride * 4, copy_w * 4);
++   }
++
++   int ahb_unlock_result =
++      AHardwareBuffer_unlock(chain->images[image_index].ahb, NULL);
++   int window_post_result = ANativeWindow_unlockAndPost(chain->window);
++   if (ahb_unlock_result != 0 || window_post_result != 0)
++      return panvk_errorf(
++         swapchain->device, VK_ERROR_SURFACE_LOST_KHR,
++         "Android present failed: ahb_unlock=%d window_post=%d",
++         ahb_unlock_result, window_post_result);
+@@ -345,4 +379,7 @@
+     if (pCreateInfo->minImageCount < 2 || pCreateInfo->minImageCount > 3)
+        return VK_ERROR_INITIALIZATION_FAILED;
+ 
++    if (pCreateInfo->imageFormat != VK_FORMAT_R8G8B8A8_UNORM)
++       return VK_ERROR_FORMAT_NOT_SUPPORTED;
++
+     VkResult result;
+@@ -367,6 +404,21 @@
+     chain->window = android_surface->window;
+     if (chain->window) {
+-       ANativeWindow_setBuffersGeometry(
+-          chain->window, pCreateInfo->imageExtent.width,
+-          pCreateInfo->imageExtent.height, WINDOW_FORMAT_RGBA_8888);
++       int usage_result = ANativeWindow_setUsage(
++          chain->window, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN);
++       if (usage_result != 0) {
++          panvk_android_swapchain_destroy(&chain->base, pAllocator);
++          return panvk_errorf(device, VK_ERROR_SURFACE_LOST_KHR,
++                              "ANativeWindow_setUsage failed: %d",
++                              usage_result);
++       }
++
++       int geometry_result = ANativeWindow_setBuffersGeometry(
++          chain->window, pCreateInfo->imageExtent.width,
++          pCreateInfo->imageExtent.height, WINDOW_FORMAT_RGBA_8888);
++       if (geometry_result != 0) {
++          panvk_android_swapchain_destroy(&chain->base, pAllocator);
++          return panvk_errorf(device, VK_ERROR_SURFACE_LOST_KHR,
++                              "ANativeWindow_setBuffersGeometry failed: %d",
++                              geometry_result);
++       }
+     }

@@ -1,0 +1,73 @@
+{
+  "profile": "g925-v13-csf",
+  "gpuId": "0xd8300010",
+  "panArch": 13,
+  "runtimeValidated": false,
+  "userReportedDx12Smoke": "working on emulator; not independently reproduced in this workspace",
+  "requestedNonRayGpuInfoExtensionCount": 11,
+  "implementedNonRayGpuInfoExtensionCount": 5,
+  "unimplementedNonRayGpuInfoExtensionCount": 6,
+  "implementedRequestedExtensionCount": 6,
+  "unimplementedRequestedExtensionCount": 6,
+  "enumeratedFeatureDisabledRequestedExtensionCount": 0,
+  "requestedExtensions": [
+    {
+      "name": "VK_KHR_robustness2",
+      "feature": "robustImageAccess2",
+      "status": "implemented-runtime-verified",
+      "notes": "NIR image load/store/atomic bounds lowering runs before descriptor lowering. On G925 v13, the Android robustness2 workload enabled robustBufferAccess2, robustImageAccess2, and nullDescriptor; all applicable OOB/null buffer, image, texel, descriptor-indexing, and update-after-bind cases passed. Null sampler is not applicable because nullDescriptor does not permit null sampler handles. CTS remains unrun."
+    },
+    {
+      "name": "VK_EXT_image_compression_control_swapchain",
+      "status": "implemented-runtime-verified",
+      "notes": "Android WSI exposes compression control for swapchain images and forwards the flags to PanVK image creation. Fixed-rate modes are explicitly rejected because PanVK reports no fixed-rate compression support; only its existing lossless AFBC default/disabled behavior is available. PanProbe's swapchain_lifecycle test passed on the OnePlus 2602BPC18G (Mali-G925), creating swapchains with DEFAULT compression control."
+    },
+    {
+      "name": "VK_ANDROID_external_format_resolve",
+      "status": "not-implemented"
+    },
+    {
+      "name": "VK_ARM_render_pass_striped",
+      "status": "not-implemented"
+    },
+    {
+      "name": "VK_EXT_device_fault",
+      "status": "implemented-build-verified-runtime-pending",
+      "notes": "On CSF architectures PanVK preserves the first queue fault seen by queue-status checks. vkGetDeviceFaultInfoEXT returns one vendor record with raw CS_FAULT/CS_FAULT_INFO data (or the driver error code); raw info is not misreported as a decoded address. Vendor binary and address records are not advertised. Runtime fault injection has not been tested on G925."
+    },
+    {
+      "name": "VK_EXT_fragment_density_map",
+      "status": "not-implemented"
+    },
+    {
+      "name": "VK_EXT_fragment_density_map2",
+      "status": "not-implemented"
+    },
+    {
+      "name": "VK_EXT_frame_boundary",
+      "feature": "frameBoundary",
+      "status": "implemented-runtime-verified",
+      "notes": "PanVK exposes the feature; Mesa's common queue runtime preserves VkFrameBoundaryEXT, frame ID, image/buffer handles, and tag data across legacy QueueSubmit conversion, queued submissions, and submit batching. PanProbe's swapchain_lifecycle test passed on the OnePlus 2602BPC18G (Mali-G925) and logged frame-boundary markers submitted for rendered frames. The marker is a tooling hint and does not change GPU execution; no profiling-tool consumer reads the retained metadata."
+    },
+    {
+      "name": "VK_EXT_pipeline_protected_access",
+      "feature": "pipelineProtectedAccess",
+      "status": "implemented-runtime-verified",
+      "notes": "On the OnePlus 2602BPC18G (Mali-G925), PanProbe queried pipelineProtectedAccess=true and successfully created a device with VK_EXT_pipeline_protected_access enabled (PIPELINE_PROTECTED_ACCESS PASS feature-enable). protectedMemory remains unsupported: the Kbase protected-region query returned flags 0x280c without KBASE_REG_PROTECTED, so protected allocation correctly reports SKIP. Evidence: pipeline-protected-access-runtime.txt."
+    },
+    {
+      "name": "VK_EXT_subpass_merge_feedback",
+      "status": "implemented-runtime-verified",
+      "feature": "subpassMergeFeedback",
+      "notes": "PanVK's common vkCreateRenderPass2 path reports each subpass as unmerged, with unchanged post-merge indices/count. PanProbe's swapchain_lifecycle test passed on the OnePlus 2602BPC18G (Mali-G925), reporting status=12 and postMergeIndex=0 for the single-subpass render pass."
+    },
+    {
+      "name": "VK_KHR_fragment_shading_rate",
+      "status": "not-implemented"
+    },
+    {
+      "name": "VK_KHR_shared_presentable_image",
+      "status": "not-implemented"
+    }
+  ]
+}

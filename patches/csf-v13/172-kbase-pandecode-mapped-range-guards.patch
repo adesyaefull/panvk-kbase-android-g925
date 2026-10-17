@@ -1,0 +1,111 @@
+From: Adesyaefull <138977848+adesyaefull@users.noreply.github.com>
+Subject: [PATCH] panfrost/genxml: guard trace decoder against invalid GPU addresses
+
+purpose: Prevent pandecode from dereferencing null or unmapped GPU addresses
+while retaining command-stream and hardware-trace decoding.
+source-reference: Mesa 5a07217f034b3e50d8c7c7794f97a2df1742613b
+tested-GPU: Mali-G925, PAN_ARCH 13
+tested-Kbase-UAPI: Android Mali kbase CSF
+Mesa-base-range: 5a07217f034b3e50d8c7c7794f97a2df1742613b
+dependencies: none
+validation-test: tests/dxvk-vkd3d/test_kbase_tracebuf_auto_va.py
+---
+diff --git a/src/panfrost/genxml/decode.c b/src/panfrost/genxml/decode.c
+--- a/src/panfrost/genxml/decode.c
++++ b/src/panfrost/genxml/decode.c
+@@ -237,6 +237,11 @@
+ {
+    const unsigned dcd_size = pan_size(DRAW);
+ 
++   if (!dcd_pointer) {
++      pandecode_log(ctx, "Frame shader DCDs: <null address>\n");
++      return;
++   }
++
+    if (pre_frame_0 != MALI_PRE_POST_FRAME_SHADER_MODE_NEVER) {
+       const struct mali_draw_packed *PANDECODE_PTR_VAR(
+          ctx, dcd, dcd_pointer + (0 * dcd_size));
+@@ -277,6 +282,11 @@
+ GENX(pandecode_sample_locations)(struct pandecode_context *ctx,
+                                  uint64_t sample_locations)
+ {
++   if (!sample_locations) {
++      pandecode_log(ctx, "Sample locations: <null address>\n");
++      return;
++   }
++
+    const uint16_t *PANDECODE_PTR_VAR(ctx, samples, sample_locations);
+ 
+    pandecode_log(ctx, "Sample locations @%" PRIx64 ":\n", sample_locations);
+@@ -468,10 +478,34 @@
+ }
+ #endif
+ 
++static bool
++pandecode_gpu_mem_range_is_mapped(struct pandecode_context *ctx, uint64_t addr,
++                                 size_t size)
++{
++   const struct pandecode_mapped_memory *mem =
++      pandecode_find_mapped_gpu_mem_containing(ctx, addr);
++   if (!mem || !mem->addr)
++      return false;
++
++   uint64_t offset = addr - mem->gpu_va;
++   return offset <= mem->length && size <= mem->length - offset;
++}
++
+ #if PAN_ARCH >= 9
+ static void
+ pandecode_tex_plane(struct pandecode_context *ctx, uint64_t u, unsigned idx)
+ {
++   if (!u) {
++      pandecode_log(ctx, "Plane %u: <null address>\n", idx);
++      return;
++   }
++
++   if (!pandecode_gpu_mem_range_is_mapped(ctx, u, pan_size(PLANE_HEADER))) {
++      pandecode_log(ctx, "Plane %u: <unmapped address %" PRIx64 ">\n", idx,
++                    u);
++      return;
++   }
++
+    const struct mali_plane_header_packed *cl =
+       pandecode_fetch_gpu_mem(ctx, u, pan_size(PLANE_HEADER));
+ 
+@@ -541,8 +575,12 @@
+    if (temp.dimension == MALI_TEXTURE_DIMENSION_CUBE)
+       plane_count *= 6;
+ 
+-   for (unsigned i = 0; i < plane_count; ++i)
+-      pandecode_tex_plane(ctx, temp.surfaces + i * pan_size(NULL_PLANE), i);
++   if (!temp.surfaces) {
++      pandecode_log(ctx, "Texture planes: <null address>\n");
++   } else {
++      for (unsigned i = 0; i < plane_count; ++i)
++         pandecode_tex_plane(ctx, temp.surfaces + i * pan_size(NULL_PLANE), i);
++   }
+ #else
+    pandecode_texture_payload(ctx, temp.surfaces, &temp);
+ #endif
+@@ -638,8 +676,20 @@
+ static void
+ pandecode_resources(struct pandecode_context *ctx, uint64_t addr, unsigned size)
+ {
++   if (size % 0x20) {
++      pandecode_log(ctx, "Invalid resource list size %u at %" PRIx64 "\n",
++                    size, addr);
++      return;
++   }
++
++   if (!pandecode_gpu_mem_range_is_mapped(ctx, addr, size)) {
++      pandecode_log(ctx, "Resource list @%" PRIx64
++                         " with size %u is not mapped\n",
++                    addr, size);
++      return;
++   }
++
+    const uint8_t *cl = pandecode_fetch_gpu_mem(ctx, addr, size);
+-   assert((size % 0x20) == 0);
+ 
+    for (unsigned i = 0; i < size; i += 0x20) {
+       pan_unpack((const struct mali_descriptor_header_packed *)&cl[i],
